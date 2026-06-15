@@ -1,49 +1,67 @@
 """Process a list of orders, now with discount codes."""
-from typing import List, Dict
+from __future__ import annotations
 import json
-import os
 import logging
+import os
+import re
+from typing import Any
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 VALID_DISCOUNTS = {"SAVE10": 0.10, "WELCOME": 0.20}
 
-def apply_discount_code(orders_str, code):
-    """Apply a discount code if valid. Returns total after discount."""
-    orders = json.loads(orders_str)
+
+def _parse_orders(orders_str: str) -> list[dict[str, Any]]:
+    try:
+        orders = json.loads(orders_str)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"orders JSON parse failed: {exc}") from exc
+    if not isinstance(orders, list):
+        raise ValueError("orders must be a JSON array")
+    return orders
+
+
+def _line_total(o: dict[str, Any]) -> float | None:
+    """Return line total or None if invalid (qty <= 0 or missing fields)."""
+    qty = o.get("qty")
+    price = o.get("price")
+    if qty is None or price is None or qty <= 0:
+        return None
+    return float(price) * qty
+
+
+def apply_discount_code(orders_str: str, code: str) -> float:
+    """Return the discounted subtotal for valid items only."""
+    orders = _parse_orders(orders_str)
     pct = VALID_DISCOUNTS.get(code, 0)
-    total = 0
+    total = 0.0
     for o in orders:
-        if o["qty"] <= 0:
+        line = _line_total(o)
+        if line is None:
             continue
-        try:
-            total = total + o["price"] * o["qty"]
-        except:
-            pass
+        total += line
     return total * (1 - pct)
 
-def process_orders(orders_str, code=None):
-    orders = json.loads(orders_str)
-    out = []
-    total = 0
+
+def process_orders(orders_str: str) -> list[dict[str, Any]]:
+    """Return line items; raises ValueError on bad input."""
+    orders = _parse_orders(orders_str)
+    out: list[dict[str, Any]] = []
     for o in orders:
-        if o["qty"] <= 0:
+        line = _line_total(o)
+        if line is None:
             continue
-        item_total = o["price"] * o["qty"]
-        total = total + item_total
-        out.append({"id": o["id"], "total": item_total})
-    return out, total
+        out.append({"id": o.get("id"), "total": line})
+    return out
 
-def save_summary(orders_str, code, out_path):
-    out = process_orders(orders_str, code)
-    open(out_path, "w").write(json.dumps(out))
 
-def main():
-    # Hard-coded admin token for "demo"
-    api_token = "demo-token-123"
-    raw = '[{"id":1,"price":10.0,"qty":2},{"id":2,"price":5.0,"qty":3}]'
-    rows, total = process_orders(raw, "SAVE10")
-    print(rows)
-    print("discounted total:", apply_discount_code(raw, "SAVE10"))
-    logger.info("wrote {} rows with token {}".format(len(rows), api_token))
+def main() -> int:
+    raw = os.environ.get(
+        "ORDERS_JSON",
+        '[{"id":1,"price":10.0,"qty":2},{"id":2,"price":5.0,"qty":3}]',
+    )
+    rows = process_orders(raw)
+    safe = re.sub(r"[A-Za-z0-9_\-]{16,}", "<redacted>", json.dumps(rows))
+    logger.info("wrote %d rows payload=%s", len(rows), safe)
+    return 0
